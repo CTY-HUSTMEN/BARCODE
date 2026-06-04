@@ -22,22 +22,26 @@
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
 
+        // Đã xóa trạng thái cứng action và tiền tố [BÁN]/[TẶNG]
         const BARCODE_MAP = {
-            "CB101": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Nhai", h2: "Nhai", action: "buy", name: "[BÁN] Combo 1 (Tủ lạnh + 2 Nhài)" },
-            "CB102": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Buoi", h2: "Que", action: "gift", name: "[TẶNG] Combo 1 (Tủ lạnh + Bưởi + Quế)" },
-            "CB201": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Ca_phe", h2: "Hoa_hong", action: "buy", name: "[BÁN] Combo 2 (Giày + Cafe + Hoa hồng)" },
-            "CB202": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Oai_huong", h2: "Oai_huong", action: "buy", name: "[BÁN] Combo 2 (Giày + 2 Oải hương)" },
-            "SP001": { itemType: "single", id: "HUT_MUI_TU_LANH", action: "buy", name: "[BÁN] Hút mùi tủ lạnh" },
-            "SP002": { itemType: "single", id: "TUI_HUT_MUI_GIAY", action: "buy", name: "[BÁN] Túi hút mùi giày" },
-            "SP003": { itemType: "single", id: "ETHYLEN", action: "buy", name: "[BÁN] Ethylen" },
-            "SP004": { itemType: "single", id: "CO2", action: "buy", name: "[BÁN] CO2" },
-            "TH001": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Buoi", action: "buy", name: "[BÁN] Túi tỏa hương (Bưởi)" },
-            "TH002": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Nhai", action: "buy", name: "[BÁN] Túi tỏa hương (Nhài)" },
-            "TH003": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Que", action: "gift", name: "[TẶNG] Túi tỏa hương (Quế)" },
+            "CB101": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Nhai", h2: "Nhai", name: "Combo 1 (Tủ lạnh + 2 Nhài)" },
+            "CB102": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Buoi", h2: "Que", name: "Combo 1 (Tủ lạnh + Bưởi + Quế)" },
+            "CB201": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Ca_phe", h2: "Hoa_hong", name: "Combo 2 (Giày + Cafe + Hoa hồng)" },
+            "CB202": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Oai_huong", h2: "Oai_huong", name: "Combo 2 (Giày + 2 Oải hương)" },
+            "SP001": { itemType: "single", id: "HUT_MUI_TU_LANH", name: "Hút mùi tủ lạnh" },
+            "SP002": { itemType: "single", id: "TUI_HUT_MUI_GIAY", name: "Túi hút mùi giày" },
+            "SP003": { itemType: "single", id: "ETHYLEN", name: "Ethylen" },
+            "SP004": { itemType: "single", id: "CO2", name: "CO2" },
+            "TH001": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Buoi", name: "Túi tỏa hương (Bưởi)" },
+            "TH002": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Nhai", name: "Túi tỏa hương (Nhài)" },
+            "TH003": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Que", name: "Túi tỏa hương (Quế)" },
         };
 
         let isProcessing = false;
         let lastTransactionData = null; 
+        
+        // Trạng thái mặc định là TẶNG ("gift")
+        window.currentMode = "gift"; 
 
         function playSuccessSound() {
             const sound = document.getElementById("soundSuccess");
@@ -48,6 +52,23 @@
             const sound = document.getElementById("soundError");
             sound.currentTime = 0; sound.play().catch(e => {});
         }
+
+        window.setMode = function(mode) {
+            window.currentMode = mode;
+            const modeBtn = document.getElementById("modeBtn");
+            if (mode === "buy") {
+                modeBtn.innerHTML = `🛒 CHẾ ĐỘ: <b>BÁN</b> (Quét mã "TANG" để đổi)`;
+                modeBtn.className = "mode-btn mode-buy";
+            } else {
+                modeBtn.innerHTML = `🎁 CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)`;
+                modeBtn.className = "mode-btn mode-gift";
+            }
+            document.getElementById("barcodeInput").focus();
+        };
+
+        window.toggleMode = function() {
+            window.setMode(window.currentMode === "gift" ? "buy" : "gift");
+        };
 
         window.changeQty = function(amount) {
             const input = document.getElementById("qtyInput");
@@ -82,10 +103,9 @@
                 }
             });
 
-            // Thay đổi từ keypress sang keydown để bắt được phím mũi tên Lên/Xuống
             inputElement.addEventListener("keydown", function(event) {
                 if (event.key === "ArrowUp") {
-                    event.preventDefault(); // Tránh việc con trỏ nhảy lung tung
+                    event.preventDefault();
                     window.changeQty(1);
                 } 
                 else if (event.key === "ArrowDown") {
@@ -105,8 +125,24 @@
         });
 
         function processBarcode(code) {
-            if (code.startsWith("QTY-")) {
-                const numStr = code.replace("QTY-", "");
+            // Kiểm tra mã lệnh chuyển chế độ (Command Barcodes)
+            const upperCode = code.toUpperCase();
+            if (upperCode === "BAN") {
+                window.setMode("buy");
+                showStatus("Chuyển sang chế độ BÁN", "success");
+                playSuccessSound();
+                return;
+            }
+            if (upperCode === "TANG") {
+                window.setMode("gift");
+                showStatus("Chuyển sang chế độ TẶNG", "success");
+                playSuccessSound();
+                return;
+            }
+
+            // Xử lý mã thay đổi số lượng
+            if (upperCode.startsWith("QTY-")) {
+                const numStr = upperCode.replace("QTY-", "");
                 const num = parseInt(numStr);
                 if (!isNaN(num) && num > 0) {
                     window.setQty(num);
@@ -131,7 +167,11 @@
 
         function executeTransaction(counter, itemData, code, qty) {
             isProcessing = true;
-            showStatus(`Đang xử lý: ${itemData.name} (SL: ${qty})...`, "processing");
+            const action = window.currentMode; // Lấy chế độ đang được chọn
+            const displayPrefix = action === "buy" ? "[BÁN]" : "[TẶNG]";
+            const displayName = `${displayPrefix} ${itemData.name}`;
+
+            showStatus(`Đang xử lý: ${displayName} (SL: ${qty})...`, "processing");
             document.getElementById("undoBtn").style.display = "none";
 
             runTransaction(ref(db), (root) => {
@@ -142,13 +182,13 @@
                 if (itemData.itemType === "single") {
                     if ((path[itemData.id]?.stock || 0) < qty) return; 
                     path[itemData.id].stock -= qty;
-                    if (itemData.action === "buy") path[itemData.id].daBan = (path[itemData.id].daBan || 0) + qty;
+                    if (action === "buy") path[itemData.id].daBan = (path[itemData.id].daBan || 0) + qty;
                     else path[itemData.id].daTang = (path[itemData.id].daTang || 0) + qty;
                 }
                 else if (itemData.itemType === "variant") {
                     if ((path[itemData.id]?.[itemData.variant]?.stock || 0) < qty) return;
                     path[itemData.id][itemData.variant].stock -= qty;
-                    if (itemData.action === "buy") path[itemData.id][itemData.variant].daBan = (path[itemData.id][itemData.variant].daBan || 0) + qty;
+                    if (action === "buy") path[itemData.id][itemData.variant].daBan = (path[itemData.id][itemData.variant].daBan || 0) + qty;
                     else path[itemData.id][itemData.variant].daTang = (path[itemData.id][itemData.variant].daTang || 0) + qty;
                 }
                 else if (itemData.itemType === "combo") {
@@ -169,7 +209,7 @@
                     const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
                     if (!path[itemData.id]) path[itemData.id] = {};
                     if (!path[itemData.id][vName]) path[itemData.id][vName] = {stock:0, daBan:0, daTang:0};
-                    if (itemData.action === "buy") path[itemData.id][vName].daBan += qty;
+                    if (action === "buy") path[itemData.id][vName].daBan += qty;
                     else path[itemData.id][vName].daTang += qty;
                 }
                 return root;
@@ -180,7 +220,7 @@
                     return;
                 }
 
-                const logRef = ref(db, "logs/" + itemData.action);
+                const logRef = ref(db, "logs/" + action);
                 let logData = { time: Date.now(), counter: counter, quantity: qty, item: itemData.id };
 
                 if (itemData.itemType === "single") { logData.materials = { [itemData.id]: qty }; } 
@@ -196,10 +236,11 @@
                 }
 
                 const pushedLog = push(logRef, logData);
-                lastTransactionData = { counter: counter, itemData: itemData, action: itemData.action, qty: qty, logKey: pushedLog.key };
+                // Lưu lại `action` lúc thực hiện để khi hoàn tác nó trả lại đúng số lượng cho BÁN hoặc TẶNG
+                lastTransactionData = { counter: counter, itemData: itemData, action: action, qty: qty, logKey: pushedLog.key, displayName: displayName };
 
-                showStatus(`✔️ THÀNH CÔNG: ${itemData.name} x${qty}`, "success");
-                addHistoryToUI(`${itemData.name} <b style="color:red">x${qty}</b>`, "success");
+                showStatus(`✔️ THÀNH CÔNG: ${displayName} x${qty}`, "success");
+                addHistoryToUI(`${displayName} <b style="color:red">x${qty}</b>`, "success");
                 document.getElementById("undoBtn").style.display = "block";
 
                 document.getElementById("qtyInput").value = 1;
@@ -212,8 +253,8 @@
             if (!lastTransactionData || isProcessing) return;
             isProcessing = true;
             
-            const { counter, itemData, action, qty, logKey } = lastTransactionData;
-            showStatus(`Đang hoàn tác: ${itemData.name} (SL: ${qty})...`, "processing");
+            const { counter, itemData, action, qty, logKey, displayName } = lastTransactionData;
+            showStatus(`Đang hoàn tác: ${displayName} (SL: ${qty})...`, "processing");
 
             runTransaction(ref(db), (root) => {
                 if(!root) return root;
@@ -239,8 +280,8 @@
             }).then(res => {
                 if(res.committed){
                     if (logKey) remove(ref(db, `logs/${action}/${logKey}`));
-                    showStatus(`⚠️ ĐÃ HOÀN TÁC: ${itemData.name} x${qty}`, "warning");
-                    addHistoryToUI(`[HOÀN TÁC] ${itemData.name} x${qty}`, "undo");
+                    showStatus(`⚠️ ĐÃ HOÀN TÁC: ${displayName} x${qty}`, "warning");
+                    addHistoryToUI(`[HOÀN TÁC] ${displayName} x${qty}`, "undo");
                     lastTransactionData = null; document.getElementById("undoBtn").style.display = "none";
                 }
             }).catch(err => { showStatus(`LỖI HOÀN TÁC: ${err.message}`, "error"); })
@@ -271,9 +312,15 @@
         .title { font-size: 26px; font-weight: 900; color: #ff9800; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;}
         .subtitle { font-size: 14px; color: #555; margin-bottom: 25px; font-weight: bold; }
         
-        select { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff;}
+        select { width: 100%; padding: 15px; margin-bottom: 15px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff;}
         select:focus { border-color: #ff9800; }
         
+        /* CSS Nút chọn chế độ */
+        .mode-btn { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; font-size: 16px; font-weight: normal; cursor: pointer; border: none; transition: 0.3s; color: white;}
+        .mode-gift { background: #4caf50; box-shadow: 0 4px 6px rgba(76, 175, 80, 0.3); }
+        .mode-buy { background: #e65100; box-shadow: 0 4px 6px rgba(230, 81, 0, 0.3); }
+        .mode-btn b { font-size: 18px; }
+
         .scan-area { background: #fdfdfd; border: 2px dashed #ff9800; border-radius: 15px; padding: 25px 20px; margin-bottom: 20px;}
         .scan-header { display: block; font-weight: bold; color: #333; margin-bottom: 15px; font-size: 16px; text-align: center;}
         
@@ -329,6 +376,10 @@
             <option value="B857">Quầy B857</option>  
         </select>
 
+        <button id="modeBtn" class="mode-btn mode-gift" onclick="toggleMode()">
+            🎁 CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)
+        </button>
+
         <div class="scan-area">
             <div class="scan-header">QUÉT MÃ VẠCH</div>
             
@@ -339,7 +390,7 @@
                 </div>
                 
                 <div class="barcode-box">
-                    <label>MÃ SẢN PHẨM</label>
+                    <label>MÃ SẢN PHẨM HOẶC LỆNH</label>
                     <input type="text" id="barcodeInput" inputmode="none" placeholder="Tít mã..." autocomplete="off">
                 </div>
             </div>
