@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HUST MEN - Hệ Thống Quét Mã Vạch</title>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        // Bổ sung import 'remove' để xóa log khi hoàn tác
+        import { getDatabase, ref, runTransaction, push, remove } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+        // =====================
+        // FIREBASE CONFIG
+        // =====================
+        const firebaseConfig = {
+            apiKey: "AIzaSyBtdk8zuVGkueYcRurRIAWIm_AlTrrGg9Y",
+            authDomain: "su-kien-fe294.firebaseapp.com",
+            databaseURL: "https://su-kien-fe294-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "su-kien-fe294",
+            storageBucket: "su-kien-fe294.firebasestorage.app",
+            messagingSenderId: "863152941656",
+            appId: "1:863152941656:web:f4adea7c33d941a9d8b82d"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // =====================
+        // CẤU HÌNH BARCODE
+        // =====================
+        const BARCODE_MAP = {
+            "CB101": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Nhai", h2: "Nhai", action: "buy", name: "[BÁN] Combo 1 (Tủ lạnh + 2 Nhài)" },
+            "CB102": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Buoi", h2: "Que", action: "gift", name: "[TẶNG] Combo 1 (Tủ lạnh + Bưởi + Quế)" },
+            "CB201": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Ca_phe", h2: "Hoa_hong", action: "buy", name: "[BÁN] Combo 2 (Giày + Cafe + Hoa hồng)" },
+            "CB202": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Oai_huong", h2: "Oai_huong", action: "buy", name: "[BÁN] Combo 2 (Giày + 2 Oải hương)" },
+            "SP001": { itemType: "single", id: "HUT_MUI_TU_LANH", action: "buy", name: "[BÁN] Hút mùi tủ lạnh" },
+            "SP002": { itemType: "single", id: "TUI_HUT_MUI_GIAY", action: "buy", name: "[BÁN] Túi hút mùi giày" },
+            "SP003": { itemType: "single", id: "ETHYLEN", action: "buy", name: "[BÁN] Ethylen" },
+            "SP004": { itemType: "single", id: "CO2", action: "buy", name: "[BÁN] CO2" },
+            "TH001": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Buoi", action: "buy", name: "[BÁN] Túi tỏa hương (Bưởi)" },
+            "TH002": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Nhai", action: "buy", name: "[BÁN] Túi tỏa hương (Nhài)" },
+            "TH003": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Que", action: "gift", name: "[TẶNG] Túi tỏa hương (Quế)" },
+        };
+
+        // =====================
+        // BIẾN TOÀN CỤC
+        // =====================
+        let isProcessing = false;
+        let lastTransactionData = null; // Lưu lại GD cuối để hoàn tác
+
+        // =====================
+        // ÂM THANH
+        // =====================
+        function playSuccessSound() {
+            const sound = document.getElementById("soundSuccess");
+            sound.currentTime = 0; 
+            sound.play().catch(e => console.log("Audio play prevented:", e));
+        }
+
+        function playErrorSound() {
+            const sound = document.getElementById("soundError");
+            sound.currentTime = 0; 
+            sound.play().catch(e => console.log("Audio play prevented:", e));
+        }
+
+        // =====================
+        // LẮNG NGHE MÁY QUÉT
+        // =====================
+        document.addEventListener("DOMContentLoaded", () => {
+            const inputElement = document.getElementById("barcodeInput");
+            inputElement.focus();
+            
+            // Ép focus lại vào ô input nếu click ra ngoài (giúp dùng máy quét liên tục)
+            document.body.addEventListener("click", (e) => {
+                if (e.target.id !== "undoBtn" && e.target.tagName !== "SELECT") {
+                    inputElement.focus();
+                }
+            });
+
+            inputElement.addEventListener("keypress", function(event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    const scannedCode = this.value.trim();
+                    this.value = ""; 
+                    if (!scannedCode) return;
+                    processBarcode(scannedCode);
+                }
+            });
+
+            // Lắng nghe nút Hoàn tác
+            document.getElementById("undoBtn").addEventListener("click", undoLastTransaction);
+        });
+
+        // =====================
+        // KIỂM TRA MÃ VẠCH
+        // =====================
+        function processBarcode(code) {
+            const counter = document.getElementById("counter").value;
+            
+            if (!counter) {
+                showStatus("LỖI: Vui lòng chọn quầy trước!", "error");
+                return;
+            }
+            if (isProcessing) {
+                showStatus("Hệ thống đang xử lý, vui lòng chờ...", "warning");
+                return;
+            }
+
+            const itemData = BARCODE_MAP[code];
+            if (!itemData) {
+                showStatus(`LỖI: Mã vạch [${code}] không tồn tại!`, "error");
+                return;
+            }
+
+            executeTransaction(counter, itemData, code);
+        }
+
+        // =====================
+        // GIAO DỊCH FIREBASE (QUÉT XUẤT)
+        // =====================
+        function executeTransaction(counter, itemData, code) {
+            isProcessing = true;
+            showStatus(`Đang xử lý: ${itemData.name}...`, "processing");
+            
+            // Ẩn nút hoàn tác khi đang xử lý GD mới
+            document.getElementById("undoBtn").style.display = "none";
+
+            runTransaction(ref(db), (root) => {
+                if(!root) return root;
+                const path = root.kho[counter];
+                if(!path) return;
+
+                if (itemData.itemType === "single") {
+                    if ((path[itemData.id]?.stock || 0) < 1) return;
+                    path[itemData.id].stock -= 1;
+                    if (itemData.action === "buy") path[itemData.id].daBan = (path[itemData.id].daBan || 0) + 1;
+                    else path[itemData.id].daTang = (path[itemData.id].daTang || 0) + 1;
+                }
+                else if (itemData.itemType === "variant") {
+                    if ((path[itemData.id]?.[itemData.variant]?.stock || 0) < 1) return;
+                    path[itemData.id][itemData.variant].stock -= 1;
+                    if (itemData.action === "buy") path[itemData.id][itemData.variant].daBan = (path[itemData.id][itemData.variant].daBan || 0) + 1;
+                    else path[itemData.id][itemData.variant].daTang = (path[itemData.id][itemData.variant].daTang || 0) + 1;
+                }
+                else if (itemData.itemType === "combo") {
+                    const { base, h1, h2 } = itemData;
+                    if ((path[base]?.stock || 0) < 1) return;
+
+                    if (h1 !== h2) {
+                        if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < 1) return;
+                        if ((path["TUI_TOA_HUONG"]?.[h2]?.stock || 0) < 1) return;
+                        path["TUI_TOA_HUONG"][h1].stock -= 1;
+                        path["TUI_TOA_HUONG"][h2].stock -= 1;
+                    } else {
+                        if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < 2) return;
+                        path["TUI_TOA_HUONG"][h1].stock -= 2;
+                    }
+
+                    path[base].stock -= 1;
+
+                    const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
+                    if (!path[itemData.id]) path[itemData.id] = {};
+                    if (!path[itemData.id][vName]) path[itemData.id][vName] = {stock:0, daBan:0, daTang:0};
+                    
+                    if (itemData.action === "buy") path[itemData.id][vName].daBan += 1;
+                    else path[itemData.id][vName].daTang += 1;
+                }
+                return root;
+
+            }).then(res => {
+                if(!res.committed){
+                    showStatus(`LỖI: Không đủ hàng trong kho quầy ${counter}!`, "error");
+                    return;
+                }
+
+                // Đẩy logs
+                const logRef = ref(db, "logs/" + itemData.action);
+                let logData = {
+                    time: Date.now(),
+                    counter: counter,
+                    quantity: 1,
+                    item: itemData.id
+                };
+
+                if (itemData.itemType === "single") {
+                    logData.materials = { [itemData.id]: 1 };
+                } 
+                else if (itemData.itemType === "variant") {
+                    logData.variant = itemData.variant;
+                    logData.materials = { [`${itemData.id}_${itemData.variant}`]: 1 };
+                } 
+                else if (itemData.itemType === "combo") {
+                    const vName = (itemData.h1 !== itemData.h2) ? `${itemData.h1}_${itemData.h2}` : itemData.h1;
+                    logData.variant = vName;
+                    
+                    let mats = { [itemData.base]: 1 };
+                    if (itemData.h1 !== itemData.h2) {
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = 1;
+                        mats["TUI_TOA_HUONG_" + itemData.h2] = 1;
+                    } else {
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = 2;
+                    }
+                    logData.materials = mats;
+                }
+
+                const pushedLog = push(logRef, logData);
+
+                // Lưu dữ liệu để Undo
+                lastTransactionData = {
+                    counter: counter,
+                    itemData: itemData,
+                    action: itemData.action,
+                    logKey: pushedLog.key
+                };
+
+                showStatus(`✔️ THÀNH CÔNG: ${itemData.name}`, "success");
+                addHistoryToUI(itemData.name, "success");
+                document.getElementById("undoBtn").style.display = "block"; // Hiện nút Hoàn tác
+
+            }).catch((err) => {
+                showStatus(`LỖI MẠNG: ${err.message}`, "error");
+            }).finally(() => {
+                isProcessing = false;
+            });
+        }
+
+        // =====================
+        // HOÀN TÁC (UNDO)
+        // =====================
+        function undoLastTransaction() {
+            if (!lastTransactionData || isProcessing) return;
+            isProcessing = true;
+            
+            const { counter, itemData, action, logKey } = lastTransactionData;
+            showStatus(`Đang hoàn tác: ${itemData.name}...`, "processing");
+
+            runTransaction(ref(db), (root) => {
+                if(!root) return root;
+                const path = root.kho[counter];
+                if(!path) return;
+
+                // Cộng lại hàng (Trả về kho)
+                if (itemData.itemType === "single") {
+                    path[itemData.id].stock += 1;
+                    if (action === "buy") path[itemData.id].daBan -= 1;
+                    else path[itemData.id].daTang -= 1;
+                }
+                else if (itemData.itemType === "variant") {
+                    path[itemData.id][itemData.variant].stock += 1;
+                    if (action === "buy") path[itemData.id][itemData.variant].daBan -= 1;
+                    else path[itemData.id][itemData.variant].daTang -= 1;
+                }
+                else if (itemData.itemType === "combo") {
+                    const { base, h1, h2 } = itemData;
+                    if (h1 !== h2) {
+                        path["TUI_TOA_HUONG"][h1].stock += 1;
+                        path["TUI_TOA_HUONG"][h2].stock += 1;
+                    } else {
+                        path["TUI_TOA_HUONG"][h1].stock += 2;
+                    }
+                    path[base].stock += 1;
+
+                    const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
+                    if (action === "buy") path[itemData.id][vName].daBan -= 1;
+                    else path[itemData.id][vName].daTang -= 1;
+                }
+                return root;
+
+            }).then(res => {
+                if(res.committed){
+                    // Xóa log trên Firebase
+                    if (logKey) {
+                        remove(ref(db, `logs/${action}/${logKey}`));
+                    }
+                    showStatus(`⚠️ ĐÃ HOÀN TÁC: ${itemData.name}`, "warning");
+                    addHistoryToUI(`[HOÀN TÁC] ${itemData.name}`, "undo");
+                    
+                    // Reset trạng thái Undo
+                    lastTransactionData = null;
+                    document.getElementById("undoBtn").style.display = "none";
+                }
+            }).catch(err => {
+                showStatus(`LỖI HOÀN TÁC: ${err.message}`, "error");
+            }).finally(() => {
+                isProcessing = false;
+                document.getElementById("barcodeInput").focus(); // Trả lại focus
+            });
+        }
+
+        // =====================
+        // UI & THÔNG BÁO
+        // =====================
+        function showStatus(message, type) {
+            const statusBox = document.getElementById("statusBox");
+            statusBox.innerText = message;
+            statusBox.className = "status-box " + type;
+            
+            // Phát âm thanh
+            if (type === "error") playErrorSound();
+            if (type === "success") playSuccessSound();
+        }
+
+        function addHistoryToUI(itemName, type) {
+            const list = document.getElementById("historyList");
+            const li = document.createElement("li");
+            
+            // Lấy giờ hiện tại (HH:MM:SS)
+            const timeStr = new Date().toLocaleTimeString("vi-VN", { hour12: false });
+            
+            li.innerHTML = `<span class="time">[${timeStr}]</span> ${itemName}`;
+            if(type === "undo") li.classList.add("undo-item");
+            
+            // Thêm lên đầu danh sách
+            list.prepend(li);
+            
+            // Chỉ giữ lại 5 dòng gần nhất để tránh lag
+            if (list.children.length > 5) {
+                list.removeChild(list.lastChild);
+            }
+        }
+    </script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; min-height: 100dvh; font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ffcc99, #ffffff); display: flex; justify-content: center; align-items: center; padding: 15px;}
+        .container { background: white; padding: 30px 25px; border-radius: 20px; text-align: center; width: 100%; max-width: 500px; box-shadow: 0 15px 50px rgba(0,0,0,0.1); }
+        .title { font-size: 26px; font-weight: 900; color: #ff9800; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;}
+        .subtitle { font-size: 14px; color: #555; margin-bottom: 25px; font-weight: bold; }
+        
+        select { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff;}
+        select:focus { border-color: #ff9800; }
+        
+        .scan-area { background: #fdfdfd; border: 2px dashed #ff9800; border-radius: 15px; padding: 25px 20px; margin-bottom: 20px; position: relative;}
+        .scan-area label { display: block; font-weight: bold; color: #333; margin-bottom: 12px; font-size: 16px; }
+        .scan-area input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #ccc; font-size: 20px; text-align: center; font-weight: bold; outline: none; box-shadow: inset 0 2px 5px rgba(0,0,0,0.05); }
+        .scan-area input:focus { border-color: #ff9800; background: #fff8eb; }
+        
+        .status-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;}
+        .status-box { padding: 15px; border-radius: 12px; font-weight: bold; font-size: 15px; min-height: 55px; display: flex; align-items: center; justify-content: center; text-align: center; background: #f0f0f0; color: #555; transition: 0.3s;}
+        .status-box.success { background: #e8f5e9; color: #2e7d32; border: 2px solid #c8e6c9; }
+        .status-box.error { background: #ffebee; color: #c62828; border: 2px solid #ffcdd2; }
+        .status-box.warning { background: #fff8e1; color: #f57f17; border: 2px solid #ffecb3; }
+        .status-box.processing { background: #e3f2fd; color: #1565c0; border: 2px solid #bbdefb; }
+
+        .btn-undo { display: none; width: 100%; padding: 12px; border: none; border-radius: 10px; background: #d32f2f; color: white; font-weight: bold; font-size: 15px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 6px rgba(211, 47, 47, 0.3); transition: 0.2s;}
+        .btn-undo:hover { background: #b71c1c; }
+        .btn-undo:active { transform: scale(0.98); }
+
+        .history-box { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 15px; text-align: left;}
+        .history-title { font-size: 13px; font-weight: bold; color: #777; margin-bottom: 10px; text-transform: uppercase; border-bottom: 1px solid #ddd; padding-bottom: 5px;}
+        .history-box ul { list-style: none; margin: 0; padding: 0; font-size: 14px;}
+        .history-box li { padding: 5px 0; border-bottom: 1px dashed #eee; color: #2e7d32; font-weight: 500;}
+        .history-box li:last-child { border-bottom: none; }
+        .history-box li .time { color: #888; font-size: 12px; margin-right: 5px; font-weight: normal;}
+        .history-box li.undo-item { color: #c62828; text-decoration: line-through; }
+    </style>
+</head>
+<body>
+
+    <audio id="soundSuccess" src="1.mp3" preload="auto"></audio>
+    <audio id="soundError" src="2.mp3" preload="auto"></audio>
+
+    <div class="container">
+        <div class="title">HUST MEN SCANNER</div>
+        <div class="subtitle">HỆ THỐNG XỬ LÝ KHO TỔNG HỢP</div>
+
+        <select id="counter">
+            <option value="">-- BƯỚC 1: CHỌN QUẦY --</option>
+            <option value="A125">Quầy A125</option>
+            <option value="B857">Quầy B857</option>  
+        </select>
+
+        <div class="scan-area">
+            <label>BƯỚC 2: QUÉT MÃ VẠCH</label>
+            <input type="text" id="barcodeInput" inputmode="none" placeholder="Tít mã vào đây..." autocomplete="off">
+        </div>
+
+        <div class="status-container">
+            <div id="statusBox" class="status-box">
+                Sẵn sàng. Chọn quầy và quét mã!
+            </div>
+            <button id="undoBtn" class="btn-undo">Hoàn tác quét vừa rồi</button>
+        </div>
+
+        <div class="history-box">
+            <div class="history-title">Lịch sử quét gần nhất</div>
+            <ul id="historyList">
+                <li style="color:#aaa; font-style:italic;">Chưa có dữ liệu...</li>
+            </ul>
+        </div>
+    </div>
+
+</body>
+</html>
