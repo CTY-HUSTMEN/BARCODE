@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>HUST MEN - Hệ Thống Quét Mã Vạch</title>
+    <title>HUST MEN - Hệ Thống Xuất Kho</title>
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-        import { getDatabase, ref, runTransaction, push, remove } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+        import { getDatabase, ref, runTransaction, push, remove, get } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyBtdk8zuVGkueYcRurRIAWIm_AlTrrGg9Y",
@@ -22,25 +22,11 @@
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
 
-        // Đã xóa trạng thái cứng action và tiền tố [BÁN]/[TẶNG]
-        const BARCODE_MAP = {
-            "CB101": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Nhai", h2: "Nhai", name: "Combo 1 (Tủ lạnh + 2 Nhài)" },
-            "CB102": { itemType: "combo", id: "COMBO_1", base: "HUT_MUI_TU_LANH", h1: "Buoi", h2: "Que", name: "Combo 1 (Tủ lạnh + Bưởi + Quế)" },
-            "CB201": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Ca_phe", h2: "Hoa_hong", name: "Combo 2 (Giày + Cafe + Hoa hồng)" },
-            "CB202": { itemType: "combo", id: "COMBO_2", base: "TUI_HUT_MUI_GIAY", h1: "Oai_huong", h2: "Oai_huong", name: "Combo 2 (Giày + 2 Oải hương)" },
-            "SP001": { itemType: "single", id: "HUT_MUI_TU_LANH", name: "Hút mùi tủ lạnh" },
-            "SP002": { itemType: "single", id: "TUI_HUT_MUI_GIAY", name: "Túi hút mùi giày" },
-            "SP003": { itemType: "single", id: "ETHYLEN", name: "Ethylen" },
-            "SP004": { itemType: "single", id: "CO2", name: "CO2" },
-            "TH001": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Buoi", name: "Túi tỏa hương (Bưởi)" },
-            "TH002": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Nhai", name: "Túi tỏa hương (Nhài)" },
-            "TH003": { itemType: "variant", id: "TUI_TOA_HUONG", variant: "Que", name: "Túi tỏa hương (Quế)" },
-        };
-
+        let BARCODE_MAP = {}; 
+        let isReady = false; 
         let isProcessing = false;
         let lastTransactionData = null; 
         
-        // Trạng thái mặc định là TẶNG ("gift")
         window.currentMode = "gift"; 
 
         function playSuccessSound() {
@@ -76,19 +62,55 @@
             let newVal = current + amount;
             if (newVal < 1) newVal = 1;
             input.value = newVal;
+            input.classList.add("pulse-anim");
+            setTimeout(() => input.classList.remove("pulse-anim"), 200);
             document.getElementById("barcodeInput").focus(); 
         };
 
         window.setQty = function(amount) {
-            document.getElementById("qtyInput").value = amount;
+            const input = document.getElementById("qtyInput");
+            input.value = amount;
+            input.classList.add("pulse-anim");
+            setTimeout(() => input.classList.remove("pulse-anim"), 200);
             document.getElementById("barcodeInput").focus(); 
         };
 
         document.addEventListener("DOMContentLoaded", () => {
             const inputElement = document.getElementById("barcodeInput");
             const qtyElement = document.getElementById("qtyInput");
-            inputElement.focus();
             
+            showStatus("⏳ Đang tải dữ liệu hệ thống...", "processing");
+            
+            // TẢI SONG SONG MÃ VẠCH VÀ DANH SÁCH QUẦY TỪ FIREBASE
+            Promise.all([
+                get(ref(db, "barcodes")),
+                get(ref(db, "kho"))
+            ]).then(([barcodesSnap, khoSnap]) => {
+                if (barcodesSnap.exists()) {
+                    BARCODE_MAP = barcodesSnap.val();
+                    isReady = true;
+                } else {
+                    showStatus("⚠️ LỖI: Chưa có dữ liệu 'barcodes' trên Firebase!", "error");
+                    return;
+                }
+
+                if (khoSnap.exists()) {
+                    const counters = Object.keys(khoSnap.val());
+                    const counterSelect = document.getElementById("counter");
+                    counterSelect.innerHTML = '<option value="">-- CHỌN QUẦY --</option>';
+                    counters.forEach(c => {
+                        counterSelect.innerHTML += `<option value="${c}"> ${c}</option>`;
+                    });
+                }
+
+                if(isReady) {
+                    showStatus("✔️ Hệ thống sẵn sàng. Chọn quầy và quét mã!", "success");
+                    inputElement.focus();
+                }
+            }).catch((error) => {
+                showStatus("LỖI MẠNG: Không thể tải cấu hình!", "error");
+            });
+
             document.body.addEventListener("click", (e) => {
                 const ignoreTags = ["SELECT", "BUTTON", "INPUT"];
                 if (!ignoreTags.includes(e.target.tagName) && e.target.id !== "undoBtn") {
@@ -125,30 +147,22 @@
         });
 
         function processBarcode(code) {
-            // Kiểm tra mã lệnh chuyển chế độ (Command Barcodes)
-            const upperCode = code.toUpperCase();
-            if (upperCode === "BAN") {
-                window.setMode("buy");
-                showStatus("Chuyển sang chế độ BÁN", "success");
-                playSuccessSound();
-                return;
-            }
-            if (upperCode === "TANG") {
-                window.setMode("gift");
-                showStatus("Chuyển sang chế độ TẶNG", "success");
-                playSuccessSound();
+            if (!isReady) {
+                showStatus("Hệ thống chưa tải xong. Vui lòng đợi!", "warning");
                 return;
             }
 
-            // Xử lý mã thay đổi số lượng
+            const upperCode = code.toUpperCase();
+            if (upperCode === "BAN") { window.setMode("buy"); showStatus("Chuyển sang chế độ BÁN", "success"); playSuccessSound(); return; }
+            if (upperCode === "TANG") { window.setMode("gift"); showStatus("Chuyển sang chế độ TẶNG", "success"); playSuccessSound(); return; }
+
             if (upperCode.startsWith("QTY-")) {
                 const numStr = upperCode.replace("QTY-", "");
                 const num = parseInt(numStr);
                 if (!isNaN(num) && num > 0) {
                     window.setQty(num);
                     showStatus(`Đã chỉnh số lượng thành ${num}. Vui lòng quét sản phẩm!`, "warning");
-                    playSuccessSound(); 
-                    return; 
+                    playSuccessSound(); return; 
                 }
             }
 
@@ -167,7 +181,7 @@
 
         function executeTransaction(counter, itemData, code, qty) {
             isProcessing = true;
-            const action = window.currentMode; // Lấy chế độ đang được chọn
+            const action = window.currentMode; 
             const displayPrefix = action === "buy" ? "[BÁN]" : "[TẶNG]";
             const displayName = `${displayPrefix} ${itemData.name}`;
 
@@ -192,9 +206,18 @@
                     else path[itemData.id][itemData.variant].daTang = (path[itemData.id][itemData.variant].daTang || 0) + qty;
                 }
                 else if (itemData.itemType === "combo") {
-                    const { base, h1, h2 } = itemData;
-                    if ((path[base]?.stock || 0) < qty) return;
+                    const { base, baseVariant, h1, h2 } = itemData;
+                    
+                    // 1. Kiểm tra và Trừ Sản phẩm Gốc (Có tính đến Variant nếu có)
+                    if (baseVariant) {
+                        if ((path[base]?.[baseVariant]?.stock || 0) < qty) return;
+                        path[base][baseVariant].stock -= qty;
+                    } else {
+                        if ((path[base]?.stock || 0) < qty) return;
+                        path[base].stock -= qty;
+                    }
 
+                    // 2. Kiểm tra và Trừ 2 Túi Tỏa Hương
                     if (h1 !== h2) {
                         if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < qty) return;
                         if ((path["TUI_TOA_HUONG"]?.[h2]?.stock || 0) < qty) return;
@@ -204,8 +227,8 @@
                         if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < (2 * qty)) return;
                         path["TUI_TOA_HUONG"][h1].stock -= (2 * qty);
                     }
-                    path[base].stock -= qty;
 
+                    // 3. Ghi nhận doanh số (Đã bán/ Đã tặng) cho Mã Combo 
                     const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
                     if (!path[itemData.id]) path[itemData.id] = {};
                     if (!path[itemData.id][vName]) path[itemData.id][vName] = {stock:0, daBan:0, daTang:0};
@@ -228,20 +251,33 @@
                 else if (itemData.itemType === "combo") {
                     const vName = (itemData.h1 !== itemData.h2) ? `${itemData.h1}_${itemData.h2}` : itemData.h1;
                     logData.variant = vName;
-                    let mats = { [itemData.base]: qty };
+                    
+                    let mats = {};
+                    // Ghi log nguyên liệu gốc có xét variant
+                    if (itemData.baseVariant) mats[`${itemData.base}_${itemData.baseVariant}`] = qty;
+                    else mats[itemData.base] = qty;
+
+                    // Ghi log túi hương
                     if (itemData.h1 !== itemData.h2) {
-                        mats["TUI_TOA_HUONG_" + itemData.h1] = qty; mats["TUI_TOA_HUONG_" + itemData.h2] = qty;
-                    } else { mats["TUI_TOA_HUONG_" + itemData.h1] = 2 * qty; }
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = qty; 
+                        mats["TUI_TOA_HUONG_" + itemData.h2] = qty;
+                    } else { 
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = 2 * qty; 
+                    }
                     logData.materials = mats;
                 }
 
                 const pushedLog = push(logRef, logData);
-                // Lưu lại `action` lúc thực hiện để khi hoàn tác nó trả lại đúng số lượng cho BÁN hoặc TẶNG
                 lastTransactionData = { counter: counter, itemData: itemData, action: action, qty: qty, logKey: pushedLog.key, displayName: displayName };
 
                 showStatus(`✔️ THÀNH CÔNG: ${displayName} x${qty}`, "success");
                 addHistoryToUI(`${displayName} <b style="color:red">x${qty}</b>`, "success");
-                document.getElementById("undoBtn").style.display = "block";
+                
+                const undoBtn = document.getElementById("undoBtn");
+                undoBtn.style.display = "block";
+                undoBtn.classList.remove("slide-in-anim");
+                void undoBtn.offsetWidth; 
+                undoBtn.classList.add("slide-in-anim");
 
                 document.getElementById("qtyInput").value = 1;
 
@@ -282,7 +318,11 @@
                     if (logKey) remove(ref(db, `logs/${action}/${logKey}`));
                     showStatus(`⚠️ ĐÃ HOÀN TÁC: ${displayName} x${qty}`, "warning");
                     addHistoryToUI(`[HOÀN TÁC] ${displayName} x${qty}`, "undo");
-                    lastTransactionData = null; document.getElementById("undoBtn").style.display = "none";
+                    
+                    const undoBtn = document.getElementById("undoBtn");
+                    undoBtn.classList.remove("slide-in-anim");
+                    undoBtn.style.display = "none";
+                    lastTransactionData = null; 
                 }
             }).catch(err => { showStatus(`LỖI HOÀN TÁC: ${err.message}`, "error"); })
             .finally(() => { isProcessing = false; document.getElementById("barcodeInput").focus(); });
@@ -290,7 +330,11 @@
 
         function showStatus(message, type) {
             const statusBox = document.getElementById("statusBox");
-            statusBox.innerHTML = message; statusBox.className = "status-box " + type;
+            statusBox.innerHTML = message; 
+            statusBox.className = "status-box " + type;
+            statusBox.classList.remove("pop-anim");
+            void statusBox.offsetWidth; 
+            statusBox.classList.add("pop-anim");
             if (type === "error") playErrorSound(); if (type === "success") playSuccessSound();
         }
 
@@ -300,6 +344,7 @@
             const timeStr = new Date().toLocaleTimeString("vi-VN", { hour12: false });
             li.innerHTML = `<span class="time">[${timeStr}]</span> ${itemName}`;
             if(type === "undo") li.classList.add("undo-item");
+            li.classList.add("slide-down-item");
             list.prepend(li);
             if (list.children.length > 5) list.removeChild(list.lastChild);
         }
@@ -308,57 +353,57 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100%; min-height: 100dvh; font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ffcc99, #ffffff); display: flex; justify-content: center; align-items: center; padding: 15px;}
-        .container { background: white; padding: 30px 25px; border-radius: 20px; text-align: center; width: 100%; max-width: 500px; box-shadow: 0 15px 50px rgba(0,0,0,0.1); }
+        .container { background: white; padding: 30px 25px; border-radius: 20px; text-align: center; width: 100%; max-width: 500px; box-shadow: 0 15px 50px rgba(0,0,0,0.1); transition: all 0.3s ease;}
         .title { font-size: 26px; font-weight: 900; color: #ff9800; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;}
         .subtitle { font-size: 14px; color: #555; margin-bottom: 25px; font-weight: bold; }
-        
-        select { width: 100%; padding: 15px; margin-bottom: 15px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff;}
-        select:focus { border-color: #ff9800; }
-        
-        /* CSS Nút chọn chế độ */
-        .mode-btn { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; font-size: 16px; font-weight: normal; cursor: pointer; border: none; transition: 0.3s; color: white;}
-        .mode-gift { background: #4caf50; box-shadow: 0 4px 6px rgba(76, 175, 80, 0.3); }
-        .mode-buy { background: #e65100; box-shadow: 0 4px 6px rgba(230, 81, 0, 0.3); }
+        select { width: 100%; padding: 15px; margin-bottom: 15px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff; transition: border-color 0.2s, box-shadow 0.2s;}
+        select:focus { border-color: #ff9800; box-shadow: 0 0 8px rgba(255, 152, 0, 0.3); }
+        .mode-btn { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; font-size: 16px; font-weight: normal; cursor: pointer; border: none; color: white; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .mode-btn:active { transform: scale(0.97); } 
+        .mode-gift { background: #4caf50; box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4); }
+        .mode-buy { background: #e65100; box-shadow: 0 4px 15px rgba(230, 81, 0, 0.4); }
         .mode-btn b { font-size: 18px; }
-
-        .scan-area { background: #fdfdfd; border: 2px dashed #ff9800; border-radius: 15px; padding: 25px 20px; margin-bottom: 20px;}
+        .scan-area { background: #fdfdfd; border: 2px dashed #ff9800; border-radius: 15px; padding: 25px 20px; margin-bottom: 20px; transition: background 0.3s ease;}
+        .scan-area:focus-within { background: #fff8eb; border-color: #f57c00; } 
         .scan-header { display: block; font-weight: bold; color: #333; margin-bottom: 15px; font-size: 16px; text-align: center;}
-        
         .input-group { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 15px;}
         .qty-box { flex: 0 0 80px; }
         .barcode-box { flex: 1; }
-
-        .scan-area label { display: block; font-size: 12px; color: #777; margin-bottom: 5px; font-weight: bold;}
-        .scan-area input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #ccc; font-size: 20px; text-align: center; font-weight: bold; outline: none; box-shadow: inset 0 2px 5px rgba(0,0,0,0.05); }
-        .scan-area input:focus { border-color: #ff9800; background: #fff8eb; }
+        .scan-area label { display: block; font-size: 12px; color: #777; margin-bottom: 5px; font-weight: bold; transition: color 0.3s;}
+        .scan-area input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #ccc; font-size: 20px; text-align: center; font-weight: bold; outline: none; box-shadow: inset 0 2px 5px rgba(0,0,0,0.05); transition: all 0.2s ease-in-out;}
+        .scan-area input:focus { border-color: #ff9800; background: #fff; box-shadow: 0 0 10px rgba(255, 152, 0, 0.2); }
         #qtyInput { color: #d32f2f; background: #fff; }
         #qtyInput:focus { background: #ffebee; border-color: #d32f2f; }
-
         .quick-actions { display: flex; gap: 5px; justify-content: center;}
-        .quick-btn { flex: 1; padding: 10px 5px; border: none; border-radius: 8px; font-weight: bold; font-size: 15px; cursor: pointer; background: #eee; color: #333; transition: 0.2s;}
-        .quick-btn:hover { background: #ddd; }
+        .quick-btn { flex: 1; padding: 10px 5px; border: none; border-radius: 8px; font-weight: bold; font-size: 15px; cursor: pointer; background: #eee; color: #333; transition: all 0.15s ease;}
+        .quick-btn:hover { background: #ddd; transform: translateY(-2px); }
         .quick-btn:active { transform: scale(0.95); background: #ccc; }
         .quick-btn.highlight { background: #ffcc80; color: #d84315; }
         .quick-btn.highlight:hover { background: #ffb74d; }
-
         .status-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;}
-        .status-box { padding: 15px; border-radius: 12px; font-weight: bold; font-size: 15px; min-height: 55px; display: flex; align-items: center; justify-content: center; text-align: center; background: #f0f0f0; color: #555; transition: 0.3s;}
+        .status-box { padding: 15px; border-radius: 12px; font-weight: bold; font-size: 15px; min-height: 55px; display: flex; align-items: center; justify-content: center; text-align: center; background: #f0f0f0; color: #555; transition: all 0.3s ease; }
         .status-box.success { background: #e8f5e9; color: #2e7d32; border: 2px solid #c8e6c9; }
         .status-box.error { background: #ffebee; color: #c62828; border: 2px solid #ffcdd2; }
         .status-box.warning { background: #fff8e1; color: #f57f17; border: 2px solid #ffecb3; }
         .status-box.processing { background: #e3f2fd; color: #1565c0; border: 2px solid #bbdefb; }
-
-        .btn-undo { display: none; width: 100%; padding: 12px; border: none; border-radius: 10px; background: #d32f2f; color: white; font-weight: bold; font-size: 15px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 6px rgba(211, 47, 47, 0.3); transition: 0.2s;}
-        .btn-undo:hover { background: #b71c1c; }
-        .btn-undo:active { transform: scale(0.98); }
-
-        .history-box { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 15px; text-align: left;}
+        .btn-undo { display: none; width: 100%; padding: 12px; border: none; border-radius: 10px; background: #d32f2f; color: white; font-weight: bold; font-size: 15px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 6px rgba(211, 47, 47, 0.3); transition: all 0.2s ease;}
+        .btn-undo:hover { background: #b71c1c; transform: translateY(-2px); }
+        .btn-undo:active { transform: scale(0.98) translateY(0); }
+        .history-box { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 15px; text-align: left; overflow: hidden;}
         .history-title { font-size: 13px; font-weight: bold; color: #777; margin-bottom: 10px; text-transform: uppercase; border-bottom: 1px solid #ddd; padding-bottom: 5px;}
         .history-box ul { list-style: none; margin: 0; padding: 0; font-size: 14px;}
         .history-box li { padding: 5px 0; border-bottom: 1px dashed #eee; color: #2e7d32; font-weight: 500;}
         .history-box li:last-child { border-bottom: none; }
         .history-box li .time { color: #888; font-size: 12px; margin-right: 5px; font-weight: normal;}
-        .history-box li.undo-item { color: #c62828; text-decoration: line-through; }
+        .history-box li.undo-item { color: #c62828; text-decoration: line-through; opacity: 0.7;}
+        @keyframes pop { 0% { transform: scale(0.95); opacity: 0.8;} 50% { transform: scale(1.02); opacity: 1;} 100% { transform: scale(1); opacity: 1;} }
+        .pop-anim { animation: pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        @keyframes slideDown { from { transform: translateY(-15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .slide-down-item { animation: slideDown 0.3s ease-out forwards; }
+        @keyframes slideInUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .slide-in-anim { animation: slideInUp 0.3s ease-out forwards; }
+        @keyframes pulseInput { 0% { transform: scale(1); } 50% { transform: scale(1.1); background-color: #ffcdd2; } 100% { transform: scale(1); } }
+        .pulse-anim { animation: pulseInput 0.2s ease-in-out; }
     </style>
 </head>
 <body>
@@ -368,12 +413,10 @@
 
     <div class="container">
         <div class="title">HUST MEN</div>
-        <div class="subtitle"></div>
+        <div class="subtitle">HỆ THỐNG XUẤT KHO</div>
 
         <select id="counter">
-            <option value="">-- CHỌN QUẦY --</option>
-            <option value="A125">Quầy A125</option>
-            <option value="B857">Quầy B857</option>  
+            <option value="">-- Đang tải Quầy từ Firebase... --</option>
         </select>
 
         <button id="modeBtn" class="mode-btn mode-gift" onclick="toggleMode()">
@@ -405,7 +448,7 @@
 
         <div class="status-container">
             <div id="statusBox" class="status-box">
-                Sẵn sàng. Chọn quầy và quét mã!
+                Đang khởi tạo hệ thống...
             </div>
             <button id="undoBtn" class="btn-undo">Hoàn tác quét vừa rồi</button>
         </div>
