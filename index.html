@@ -43,10 +43,10 @@
             window.currentMode = mode;
             const modeBtn = document.getElementById("modeBtn");
             if (mode === "buy") {
-                modeBtn.innerHTML = `🛒 CHẾ ĐỘ: <b>BÁN</b> (Quét mã "TANG" để đổi)`;
+                modeBtn.innerHTML = `CHẾ ĐỘ: <b>BÁN</b> (Quét mã "TANG" để đổi)`;
                 modeBtn.className = "mode-btn mode-buy";
             } else {
-                modeBtn.innerHTML = `🎁 CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)`;
+                modeBtn.innerHTML = `CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)`;
                 modeBtn.className = "mode-btn mode-gift";
             }
             document.getElementById("barcodeInput").focus();
