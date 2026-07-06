@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HUST MEN - Hệ Thống Xuất Kho</title>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getDatabase, ref, runTransaction, push, remove, onValue } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyBtdk8zuVGkueYcRurRIAWIm_AlTrrGg9Y",
+            authDomain: "su-kien-fe294.firebaseapp.com",
+            databaseURL: "https://su-kien-fe294-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "su-kien-fe294",
+            storageBucket: "su-kien-fe294.firebasestorage.app",
+            messagingSenderId: "863152941656",
+            appId: "1:863152941656:web:f4adea7c33d941a9d8b82d"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        let BARCODE_MAP = {}; 
+        let isReady = false; 
+        let isProcessing = false;
+        let lastTransactionData = null; 
+        const LOW_STOCK_THRESHOLD = 5; // dưới ngưỡng này thì cảnh báo xin thêm hàng từ Kho Tổng
+        
+        window.currentMode = "gift"; 
+
+        // Đọc tồn kho còn lại của sản phẩm vừa quét, từ snapshot trả về sau transaction thành công
+        // (snapshot giờ đã được scope sẵn ở kho/{quầy}, không phải toàn bộ root nữa)
+        function getRemainingStockAfterTx(path, itemData) {
+            try {
+                if (!path) return null;
+                if (itemData.itemType === "single") return path[itemData.id]?.stock ?? null;
+                if (itemData.itemType === "variant") return path[itemData.id]?.[itemData.variant]?.stock ?? null;
+                if (itemData.itemType === "combo") {
+                    const baseStock = itemData.baseVariant
+                        ? (path[itemData.base]?.[itemData.baseVariant]?.stock ?? null)
+                        : (path[itemData.base]?.stock ?? null);
+                    const h1Stock = path["TUI_TOA_HUONG"]?.[itemData.h1]?.stock ?? null;
+                    const h2Stock = path["TUI_TOA_HUONG"]?.[itemData.h2]?.stock ?? null;
+                    if (baseStock === null || h1Stock === null || h2Stock === null) return null;
+                    const maxFlavors = (itemData.h1 === itemData.h2) ? Math.floor(h1Stock / 2) : Math.min(h1Stock, h2Stock);
+                    return Math.min(baseStock, maxFlavors); // số combo tối đa còn ghép được
+                }
+            } catch (e) { /* ignore */ }
+            return null;
+        }
+
+        function playSuccessSound() {
+            const sound = document.getElementById("soundSuccess");
+            sound.currentTime = 0; sound.play().catch(e => {});
+        }
+
+        function playErrorSound() {
+            const sound = document.getElementById("soundError");
+            sound.currentTime = 0; sound.play().catch(e => {});
+        }
+
+        window.setMode = function(mode) {
+            window.currentMode = mode;
+            const modeBtn = document.getElementById("modeBtn");
+            if (mode === "buy") {
+                modeBtn.innerHTML = `CHẾ ĐỘ: <b>BÁN</b> (Quét mã "TANG" để đổi)`;
+                modeBtn.className = "mode-btn mode-buy";
+            } else {
+                modeBtn.innerHTML = `CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)`;
+                modeBtn.className = "mode-btn mode-gift";
+            }
+            document.getElementById("barcodeInput").focus();
+        };
+
+        window.toggleMode = function() {
+            window.setMode(window.currentMode === "gift" ? "buy" : "gift");
+        };
+
+        window.changeQty = function(amount) {
+            const input = document.getElementById("qtyInput");
+            let current = parseInt(input.value) || 1;
+            let newVal = current + amount;
+            if (newVal < 1) newVal = 1;
+            input.value = newVal;
+            input.classList.add("pulse-anim");
+            setTimeout(() => input.classList.remove("pulse-anim"), 200);
+            document.getElementById("barcodeInput").focus(); 
+        };
+
+        window.setQty = function(amount) {
+            const input = document.getElementById("qtyInput");
+            input.value = amount;
+            input.classList.add("pulse-anim");
+            setTimeout(() => input.classList.remove("pulse-anim"), 200);
+            document.getElementById("barcodeInput").focus(); 
+        };
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const inputElement = document.getElementById("barcodeInput");
+            const qtyElement = document.getElementById("qtyInput");
+            
+            showSystemStatus("⏳ Đang tải dữ liệu hệ thống...", "processing");
+
+            // LẮNG NGHE REALTIME MÃ VẠCH + DANH SÁCH QUẦY TỪ FIREBASE
+            // (dùng onValue thay vì get 1 lần, để khi Admin/Kho Tổng thêm quầy mới,
+            //  thêm mã vạch mới hoặc xuất thêm hàng thì máy quét tự cập nhật ngay,
+            //  không cần tải lại trang)
+            let barcodesLoaded = false;
+            let khoLoaded = false;
+            const checkReady = () => {
+                if (barcodesLoaded && khoLoaded && !isReady) {
+                    isReady = true;
+                    showSystemStatus("✔️ Hệ thống sẵn sàng. Chọn quầy và quét mã!", "success");
+                    inputElement.focus();
+                }
+            };
+
+            onValue(ref(db, "barcodes"), (snap) => {
+                if (snap.exists()) {
+                    BARCODE_MAP = snap.val();
+                    barcodesLoaded = true;
+                    checkReady();
+                } else {
+                    showSystemStatus("⚠️ LỖI: Chưa có dữ liệu 'barcodes' trên Firebase!", "error");
+                }
+            });
+
+            onValue(ref(db, "kho"), (snap) => {
+                if (!snap.exists()) return;
+                const khoData = snap.val();
+                const counters = Object.keys(khoData);
+                const counterSelect = document.getElementById("counter");
+                const prevVal = counterSelect.value;
+                counterSelect.innerHTML = '<option value="">-- CHỌN QUẦY --</option>';
+                counters.forEach(c => {
+                    counterSelect.innerHTML += `<option value="${c}"> ${c}</option>`;
+                });
+                if (counters.includes(prevVal)) counterSelect.value = prevVal;
+                else if (counters.length === 1) counterSelect.value = counters[0]; // chỉ có 1 quầy -> tự chọn luôn cho đỡ thao tác
+                setSyncTime();
+                khoLoaded = true;
+                checkReady();
+            }, (error) => {
+                showSystemStatus("LỖI MẠNG: Không thể tải cấu hình!", "error");
+            });
+
+            document.body.addEventListener("click", (e) => {
+                const ignoreTags = ["SELECT", "BUTTON", "INPUT"];
+                if (!ignoreTags.includes(e.target.tagName) && e.target.id !== "undoBtn") {
+                    inputElement.focus();
+                }
+            });
+
+            qtyElement.addEventListener("keypress", function(event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    inputElement.focus();
+                }
+            });
+
+            inputElement.addEventListener("keydown", function(event) {
+                if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    window.changeQty(1);
+                } 
+                else if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    window.changeQty(-1);
+                }
+                else if (event.key === "Enter") {
+                    event.preventDefault();
+                    const scannedCode = this.value.trim();
+                    this.value = ""; 
+                    if (!scannedCode) return;
+                    processBarcode(scannedCode);
+                }
+            });
+
+            document.getElementById("undoBtn").addEventListener("click", undoLastTransaction);
+        });
+
+        function processBarcode(code) {
+            if (!isReady) {
+                showStatus("Hệ thống chưa tải xong. Vui lòng đợi!", "warning");
+                return;
+            }
+
+            const upperCode = code.toUpperCase();
+            if (upperCode === "BAN") { window.setMode("buy"); showStatus("Chuyển sang chế độ BÁN", "success"); playSuccessSound(); return; }
+            if (upperCode === "TANG") { window.setMode("gift"); showStatus("Chuyển sang chế độ TẶNG", "success"); playSuccessSound(); return; }
+
+            if (upperCode.startsWith("QTY-")) {
+                const numStr = upperCode.replace("QTY-", "");
+                const num = parseInt(numStr);
+                if (!isNaN(num) && num > 0) {
+                    window.setQty(num);
+                    showStatus(`Đã chỉnh số lượng thành ${num}. Vui lòng quét sản phẩm!`, "warning");
+                    playSuccessSound(); return; 
+                }
+            }
+
+            const counter = document.getElementById("counter").value;
+            const qtyInputVal = parseInt(document.getElementById("qtyInput").value);
+            const qty = isNaN(qtyInputVal) || qtyInputVal < 1 ? 1 : qtyInputVal;
+            
+            if (!counter) { showStatus("LỖI: Vui lòng chọn quầy trước!", "error"); return; }
+            if (isProcessing) { showStatus("Hệ thống đang xử lý, vui lòng chờ...", "warning"); return; }
+
+            const itemData = BARCODE_MAP[upperCode] || BARCODE_MAP[code];
+            if (!itemData) { showStatus(`LỖI: Mã vạch [${code}] không tồn tại!`, "error"); return; }
+
+            executeTransaction(counter, itemData, upperCode, qty);
+        }
+
+        function executeTransaction(counter, itemData, code, qty) {
+            isProcessing = true;
+            const action = window.currentMode; 
+            const displayPrefix = action === "buy" ? "[BÁN]" : "[TẶNG]";
+            const displayName = `${displayPrefix} ${itemData.name}`;
+
+            showStatus(`Đang xử lý: ${displayName} (SL: ${qty})...`, "processing");
+            document.getElementById("undoBtn").style.display = "none";
+
+            runTransaction(ref(db, "kho/" + counter), (path) => {
+                if(!path) return path;
+
+                if (itemData.itemType === "single") {
+                    if ((path[itemData.id]?.stock || 0) < qty) return; 
+                    path[itemData.id].stock -= qty;
+                    if (action === "buy") path[itemData.id].daBan = (path[itemData.id].daBan || 0) + qty;
+                    else path[itemData.id].daTang = (path[itemData.id].daTang || 0) + qty;
+                }
+                else if (itemData.itemType === "variant") {
+                    if ((path[itemData.id]?.[itemData.variant]?.stock || 0) < qty) return;
+                    path[itemData.id][itemData.variant].stock -= qty;
+                    if (action === "buy") path[itemData.id][itemData.variant].daBan = (path[itemData.id][itemData.variant].daBan || 0) + qty;
+                    else path[itemData.id][itemData.variant].daTang = (path[itemData.id][itemData.variant].daTang || 0) + qty;
+                }
+                else if (itemData.itemType === "combo") {
+                    const { base, baseVariant, h1, h2 } = itemData;
+                    
+                    // 1. Kiểm tra và Trừ Sản phẩm Gốc (Có tính đến Variant nếu có)
+                    if (baseVariant) {
+                        if ((path[base]?.[baseVariant]?.stock || 0) < qty) return;
+                        path[base][baseVariant].stock -= qty;
+                    } else {
+                        if ((path[base]?.stock || 0) < qty) return;
+                        path[base].stock -= qty;
+                    }
+
+                    // 2. Kiểm tra và Trừ 2 Túi Tỏa Hương
+                    if (h1 !== h2) {
+                        if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < qty) return;
+                        if ((path["TUI_TOA_HUONG"]?.[h2]?.stock || 0) < qty) return;
+                        path["TUI_TOA_HUONG"][h1].stock -= qty;
+                        path["TUI_TOA_HUONG"][h2].stock -= qty;
+                    } else {
+                        if ((path["TUI_TOA_HUONG"]?.[h1]?.stock || 0) < (2 * qty)) return;
+                        path["TUI_TOA_HUONG"][h1].stock -= (2 * qty);
+                    }
+
+                    // 3. Ghi nhận doanh số (Đã bán/ Đã tặng) cho Mã Combo 
+                    const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
+                    if (!path[itemData.id]) path[itemData.id] = {};
+                    if (!path[itemData.id][vName]) path[itemData.id][vName] = {stock:0, daBan:0, daTang:0};
+                    if (action === "buy") path[itemData.id][vName].daBan += qty;
+                    else path[itemData.id][vName].daTang += qty;
+                }
+                return path;
+
+            }).then(res => {
+                if(!res.committed){
+                    showStatus(`LỖI: Tồn kho không đủ để xuất ${qty} sản phẩm!`, "error");
+                    return;
+                }
+
+                const logRef = ref(db, "logs/" + action);
+                let logData = { time: Date.now(), counter: counter, quantity: qty, item: itemData.id };
+
+                if (itemData.itemType === "single") { logData.materials = { [itemData.id]: qty }; } 
+                else if (itemData.itemType === "variant") { logData.variant = itemData.variant; logData.materials = { [`${itemData.id}_${itemData.variant}`]: qty }; } 
+                else if (itemData.itemType === "combo") {
+                    const vName = (itemData.h1 !== itemData.h2) ? `${itemData.h1}_${itemData.h2}` : itemData.h1;
+                    logData.variant = vName;
+                    
+                    let mats = {};
+                    // Ghi log nguyên liệu gốc có xét variant
+                    if (itemData.baseVariant) mats[`${itemData.base}_${itemData.baseVariant}`] = qty;
+                    else mats[itemData.base] = qty;
+
+                    // Ghi log túi hương
+                    if (itemData.h1 !== itemData.h2) {
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = qty; 
+                        mats["TUI_TOA_HUONG_" + itemData.h2] = qty;
+                    } else { 
+                        mats["TUI_TOA_HUONG_" + itemData.h1] = 2 * qty; 
+                    }
+                    logData.materials = mats;
+                }
+
+                const pushedLog = push(logRef, logData);
+                lastTransactionData = { counter: counter, itemData: itemData, action: action, qty: qty, logKey: pushedLog.key, displayName: displayName };
+
+                // Đọc tồn còn lại SAU giao dịch để cảnh báo sắp hết hàng (xin thêm từ Kho Tổng)
+                const remainStock = getRemainingStockAfterTx(res.snapshot?.val(), itemData);
+                const lowStockNote = (remainStock !== null && remainStock <= LOW_STOCK_THRESHOLD)
+                    ? ` ⚠️ Sắp hết! Còn <b>${remainStock}</b> — báo Kho Tổng xuất thêm.`
+                    : (remainStock !== null ? ` (Còn lại: ${remainStock})` : '');
+
+                showStatus(`✔️ THÀNH CÔNG: ${displayName} x${qty}${lowStockNote}`, remainStock !== null && remainStock <= LOW_STOCK_THRESHOLD ? "warning" : "success");
+                addHistoryToUI(`${displayName} <b style="color:red">x${qty}</b>${lowStockNote}`, "success");
+                
+                const undoBtn = document.getElementById("undoBtn");
+                undoBtn.style.display = "block";
+                undoBtn.classList.remove("slide-in-anim");
+                void undoBtn.offsetWidth; 
+                undoBtn.classList.add("slide-in-anim");
+
+                document.getElementById("qtyInput").value = 1;
+
+            }).catch((err) => { showStatus(`LỖI MẠNG: ${err.message}`, "error"); })
+            .finally(() => { isProcessing = false; });
+        }
+
+        function undoLastTransaction() {
+            if (!lastTransactionData || isProcessing) return;
+            isProcessing = true;
+            
+            const { counter, itemData, action, qty, logKey, displayName } = lastTransactionData;
+            showStatus(`Đang hoàn tác: ${displayName} (SL: ${qty})...`, "processing");
+
+            runTransaction(ref(db, "kho/" + counter), (path) => {
+                if(!path) return path;
+
+                if (itemData.itemType === "single") {
+                    path[itemData.id].stock += qty;
+                    if (action === "buy") path[itemData.id].daBan -= qty; else path[itemData.id].daTang -= qty;
+                } else if (itemData.itemType === "variant") {
+                    path[itemData.id][itemData.variant].stock += qty;
+                    if (action === "buy") path[itemData.id][itemData.variant].daBan -= qty; else path[itemData.id][itemData.variant].daTang -= qty;
+                } else if (itemData.itemType === "combo") {
+                    const { base, baseVariant, h1, h2 } = itemData;
+                    if (h1 !== h2) { path["TUI_TOA_HUONG"][h1].stock += qty; path["TUI_TOA_HUONG"][h2].stock += qty; } 
+                    else { path["TUI_TOA_HUONG"][h1].stock += (2 * qty); }
+
+                    // Hoàn lại đúng nơi đã trừ: có baseVariant thì phải cộng vào base/baseVariant,
+                    // không thì cộng thẳng vào base (khớp với logic trừ ở executeTransaction)
+                    if (baseVariant) path[base][baseVariant].stock += qty;
+                    else path[base].stock += qty;
+
+                    const vName = (h1 !== h2) ? `${h1}_${h2}` : h1;
+                    if (action === "buy") path[itemData.id][vName].daBan -= qty; else path[itemData.id][vName].daTang -= qty;
+                }
+                return path;
+            }).then(res => {
+                if(res.committed){
+                    if (logKey) remove(ref(db, `logs/${action}/${logKey}`));
+                    showStatus(`⚠️ ĐÃ HOÀN TÁC: ${displayName} x${qty}`, "warning");
+                    addHistoryToUI(`[HOÀN TÁC] ${displayName} x${qty}`, "undo");
+                    
+                    const undoBtn = document.getElementById("undoBtn");
+                    undoBtn.classList.remove("slide-in-anim");
+                    undoBtn.style.display = "none";
+                    lastTransactionData = null; 
+                }
+            }).catch(err => { showStatus(`LỖI HOÀN TÁC: ${err.message}`, "error"); })
+            .finally(() => { isProcessing = false; document.getElementById("barcodeInput").focus(); });
+        }
+
+        function setSyncTime() {
+            const el = document.getElementById("syncTime");
+            if (!el) return;
+            const t = new Date().toLocaleTimeString("vi-VN", { hour12: false });
+            el.textContent = `🔄 Đồng bộ realtime · ${t}`;
+        }
+
+        function showStatus(message, type) {
+            const statusBox = document.getElementById("statusBox");
+            statusBox.innerHTML = message; 
+            statusBox.className = "status-box " + type;
+            statusBox.classList.remove("pop-anim");
+            void statusBox.offsetWidth; 
+            statusBox.classList.add("pop-anim");
+            if (type === "error") playErrorSound(); if (type === "success") playSuccessSound();
+        }
+
+        // Dùng cho các thông báo trạng thái HỆ THỐNG (đang tải, mất mạng, chưa sẵn sàng...)
+        // KHÔNG phát âm thanh, để không bị nhầm với kết quả quét thật sự
+        function showSystemStatus(message, type) {
+            const statusBox = document.getElementById("statusBox");
+            statusBox.innerHTML = message;
+            statusBox.className = "status-box " + type;
+            statusBox.classList.remove("pop-anim");
+            void statusBox.offsetWidth;
+            statusBox.classList.add("pop-anim");
+        }
+
+        function addHistoryToUI(itemName, type) {
+            const list = document.getElementById("historyList");
+            const li = document.createElement("li");
+            const timeStr = new Date().toLocaleTimeString("vi-VN", { hour12: false });
+            li.innerHTML = `<span class="time">[${timeStr}]</span> ${itemName}`;
+            if(type === "undo") li.classList.add("undo-item");
+            li.classList.add("slide-down-item");
+            list.prepend(li);
+            if (list.children.length > 5) list.removeChild(list.lastChild);
+        }
+    </script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; min-height: 100dvh; font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ffcc99, #ffffff); display: flex; justify-content: center; align-items: center; padding: 15px;}
+        .container { background: white; padding: 30px 25px; border-radius: 20px; text-align: center; width: 100%; max-width: 500px; box-shadow: 0 15px 50px rgba(0,0,0,0.1); transition: all 0.3s ease;}
+        .title { font-size: 26px; font-weight: 900; color: #ff9800; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;}
+        .subtitle { font-size: 14px; color: #555; margin-bottom: 25px; font-weight: bold; }
+        .sync-time { font-size: 11px; color: #999; margin-top: -18px; margin-bottom: 20px; font-weight: normal; }
+        select { width: 100%; padding: 15px; margin-bottom: 15px; border-radius: 12px; border: 2px solid #ddd; font-size: 16px; font-weight: bold; outline: none; cursor: pointer; background: #fff; transition: border-color 0.2s, box-shadow 0.2s;}
+        select:focus { border-color: #ff9800; box-shadow: 0 0 8px rgba(255, 152, 0, 0.3); }
+        .mode-btn { width: 100%; padding: 15px; margin-bottom: 20px; border-radius: 12px; font-size: 16px; font-weight: normal; cursor: pointer; border: none; color: white; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .mode-btn:active { transform: scale(0.97); } 
+        .mode-gift { background: #4caf50; box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4); }
+        .mode-buy { background: #e65100; box-shadow: 0 4px 15px rgba(230, 81, 0, 0.4); }
+        .mode-btn b { font-size: 18px; }
+        .scan-area { background: #fdfdfd; border: 2px dashed #ff9800; border-radius: 15px; padding: 25px 20px; margin-bottom: 20px; transition: background 0.3s ease;}
+        .scan-area:focus-within { background: #fff8eb; border-color: #f57c00; } 
+        .scan-header { display: block; font-weight: bold; color: #333; margin-bottom: 15px; font-size: 16px; text-align: center;}
+        .input-group { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 15px;}
+        .qty-box { flex: 0 0 80px; }
+        .barcode-box { flex: 1; }
+        .scan-area label { display: block; font-size: 12px; color: #777; margin-bottom: 5px; font-weight: bold; transition: color 0.3s;}
+        .scan-area input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #ccc; font-size: 20px; text-align: center; font-weight: bold; outline: none; box-shadow: inset 0 2px 5px rgba(0,0,0,0.05); transition: all 0.2s ease-in-out;}
+        .scan-area input:focus { border-color: #ff9800; background: #fff; box-shadow: 0 0 10px rgba(255, 152, 0, 0.2); }
+        #qtyInput { color: #d32f2f; background: #fff; }
+        #qtyInput:focus { background: #ffebee; border-color: #d32f2f; }
+        .quick-actions { display: flex; gap: 5px; justify-content: center;}
+        .quick-btn { flex: 1; padding: 10px 5px; border: none; border-radius: 8px; font-weight: bold; font-size: 15px; cursor: pointer; background: #eee; color: #333; transition: all 0.15s ease;}
+        .quick-btn:hover { background: #ddd; transform: translateY(-2px); }
+        .quick-btn:active { transform: scale(0.95); background: #ccc; }
+        .quick-btn.highlight { background: #ffcc80; color: #d84315; }
+        .quick-btn.highlight:hover { background: #ffb74d; }
+        .status-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;}
+        .status-box { padding: 15px; border-radius: 12px; font-weight: bold; font-size: 15px; min-height: 55px; display: flex; align-items: center; justify-content: center; text-align: center; background: #f0f0f0; color: #555; transition: all 0.3s ease; }
+        .status-box.success { background: #e8f5e9; color: #2e7d32; border: 2px solid #c8e6c9; }
+        .status-box.error { background: #ffebee; color: #c62828; border: 2px solid #ffcdd2; }
+        .status-box.warning { background: #fff8e1; color: #f57f17; border: 2px solid #ffecb3; }
+        .status-box.processing { background: #e3f2fd; color: #1565c0; border: 2px solid #bbdefb; }
+        .btn-undo { display: none; width: 100%; padding: 12px; border: none; border-radius: 10px; background: #d32f2f; color: white; font-weight: bold; font-size: 15px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 6px rgba(211, 47, 47, 0.3); transition: all 0.2s ease;}
+        .btn-undo:hover { background: #b71c1c; transform: translateY(-2px); }
+        .btn-undo:active { transform: scale(0.98) translateY(0); }
+        .history-box { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 15px; text-align: left; overflow: hidden;}
+        .history-title { font-size: 13px; font-weight: bold; color: #777; margin-bottom: 10px; text-transform: uppercase; border-bottom: 1px solid #ddd; padding-bottom: 5px;}
+        .history-box ul { list-style: none; margin: 0; padding: 0; font-size: 14px;}
+        .history-box li { padding: 5px 0; border-bottom: 1px dashed #eee; color: #2e7d32; font-weight: 500;}
+        .history-box li:last-child { border-bottom: none; }
+        .history-box li .time { color: #888; font-size: 12px; margin-right: 5px; font-weight: normal;}
+        .history-box li.undo-item { color: #c62828; text-decoration: line-through; opacity: 0.7;}
+        @keyframes pop { 0% { transform: scale(0.95); opacity: 0.8;} 50% { transform: scale(1.02); opacity: 1;} 100% { transform: scale(1); opacity: 1;} }
+        .pop-anim { animation: pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        @keyframes slideDown { from { transform: translateY(-15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .slide-down-item { animation: slideDown 0.3s ease-out forwards; }
+        @keyframes slideInUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .slide-in-anim { animation: slideInUp 0.3s ease-out forwards; }
+        @keyframes pulseInput { 0% { transform: scale(1); } 50% { transform: scale(1.1); background-color: #ffcdd2; } 100% { transform: scale(1); } }
+        .pulse-anim { animation: pulseInput 0.2s ease-in-out; }
+    </style>
+</head>
+<body>
+
+    <audio id="soundSuccess" src="1.mp3" preload="auto"></audio>
+    <audio id="soundError" src="2.mp3" preload="auto"></audio>
+
+    <div class="container">
+        <div class="title">HUST MEN</div>
+        <div class="subtitle">HỆ THỐNG XUẤT KHO</div>
+        <div id="syncTime" class="sync-time">🔄 Đang kết nối realtime...</div>
+
+        <select id="counter">
+            <option value="">-- Đang tải Quầy từ Firebase... --</option>
+        </select>
+
+        <button id="modeBtn" class="mode-btn mode-gift" onclick="toggleMode()">
+            🎁 CHẾ ĐỘ: <b>TẶNG</b> (Quét mã "BAN" để đổi)
+        </button>
+
+        <div class="scan-area">
+            <div class="scan-header">QUÉT MÃ VẠCH</div>
+            
+            <div class="input-group">
+                <div class="qty-box">
+                    <label>SL (↑/↓)</label>
+                    <input type="number" id="qtyInput" min="1" value="1">
+                </div>
+                
+                <div class="barcode-box">
+                    <label>MÃ SẢN PHẨM HOẶC LỆNH</label>
+                    <input type="text" id="barcodeInput" inputmode="none" placeholder="Tít mã..." autocomplete="off">
+                </div>
+            </div>
+
+            <div class="quick-actions">
+                <button type="button" class="quick-btn" onclick="changeQty(-1)">- 1</button>
+                <button type="button" class="quick-btn" onclick="changeQty(1)">+ 1</button>
+                <button type="button" class="quick-btn highlight" onclick="setQty(5)">x5</button>
+                <button type="button" class="quick-btn highlight" onclick="setQty(10)">x10</button>
+            </div>
+        </div>
+
+        <div class="status-container">
+            <div id="statusBox" class="status-box">
+                Đang khởi tạo hệ thống...
+            </div>
+            <button id="undoBtn" class="btn-undo">Hoàn tác quét vừa rồi</button>
+        </div>
+
+        <div class="history-box">
+            <div class="history-title">Lịch sử quét gần nhất</div>
+            <ul id="historyList">
+                <li style="color:#aaa; font-style:italic;">Chưa có dữ liệu...</li>
+            </ul>
+        </div>
+    </div>
+
+</body>
+</html>
